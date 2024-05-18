@@ -1,8 +1,9 @@
-use crate::{BRIGHTNESS_THRESHOLD, ENABLED};
 use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
 use embassy_sync::channel::Sender;
 use embassy_sync::pubsub::Subscriber;
 use embassy_time::{Duration, Ticker};
+
+use crate::{BRIGHTNESS_THRESHOLD, ENABLED};
 
 pub struct Config {
     pub id: usize,
@@ -14,7 +15,7 @@ pub struct Config {
 }
 
 pub struct Channel {
-    pub running: Subscriber<'static, ThreadModeRawMutex, bool, 4, 4, 4>,
+    pub enabled: Subscriber<'static, ThreadModeRawMutex, bool, 4, 4, 4>,
     pub led: Sender<'static, ThreadModeRawMutex, (usize, u16), 64>,
 }
 
@@ -25,7 +26,7 @@ pub async fn run(config: Config, mut channel: Channel) {
         while !ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
             // not running, better start waiting
             channel.led.send((config.id, u16::MIN)).await;
-            channel.running.next_message_pure().await;
+            channel.enabled.next_message_pure().await;
         }
         ticker.reset();
 

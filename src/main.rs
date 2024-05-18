@@ -1,22 +1,22 @@
 #![no_std]
 #![no_main]
 
-mod debouncer;
-mod led_ctrl;
-mod toggle;
-
 use core::sync::atomic::AtomicBool;
 
+use defmt::*;
 use embassy_executor::Spawner;
-use embassy_rp::{gpio, pwm, uart, Peripheral};
+use embassy_rp::{gpio, Peripheral, pwm, uart};
 use embassy_sync::blocking_mutex::raw::{NoopRawMutex, ThreadModeRawMutex};
 use embassy_sync::channel::{Channel, Receiver, Sender};
-use embassy_sync::pubsub::{PubSubBehavior, PubSubChannel, Publisher, Subscriber};
+use embassy_sync::pubsub::{Publisher, PubSubBehavior, PubSubChannel, Subscriber};
 use embassy_time::{Duration, Ticker, Timer};
 
-use defmt::*;
-use embassy_rp::uart::{Instance, RxPin, TxPin};
 use {defmt_rtt as _, panic_probe as _};
+
+mod debouncer;
+mod led_ctrl;
+mod status;
+mod toggle;
 
 const BRIGHTNESS_THRESHOLD: u16 = 6000;
 
@@ -40,11 +40,20 @@ fn led_ctrl_run(spawner: &Spawner) {
         tick,
     };
     let to_channel = || led_ctrl::Channel {
-        running: CHANNEL_ENABLED.subscriber().unwrap(),
+        enabled: CHANNEL_ENABLED.subscriber().unwrap(),
         led: CHANNEL_LED.sender(),
     };
     unwrap!(spawner.spawn(led_ctrl::run(config_0, to_channel())));
     unwrap!(spawner.spawn(led_ctrl::run(config_1, to_channel())));
+}
+
+fn status_run(spawner: &Spawner, pin: gpio::AnyPin) {
+    let duration = Duration::from_millis(100);
+    let config = status::Config { pin, duration };
+    let channel = status::Channel {
+        enabled: CHANNEL_ENABLED.subscriber().unwrap(),
+    };
+    unwrap!(spawner.spawn(status::run(config, channel)));
 }
 
 fn toggle_run(spawner: &Spawner, pin: gpio::AnyPin) {
@@ -65,16 +74,7 @@ async fn main(spawner: Spawner) {
     uart_0
         .blocking_write("Hello World!\r\n".as_bytes())
         .unwrap();
-
-    let mut led_onboard = gpio::Output::new(p.PIN_25, gpio::Level::Low);
-    for _ in 0..3 {
-        Timer::after_millis(100).await;
-        led_onboard.set_high();
-        Timer::after_millis(100).await;
-        led_onboard.set_low();
-    }
-
-    info!("board ok, starting");
+    info!("board ok, spinning up state machines");
 
     let mut pwm_0_config: pwm::Config = Default::default();
     pwm_0_config.top = 0x8000;
@@ -82,8 +82,10 @@ async fn main(spawner: Spawner) {
     pwm_0_config.compare_b = 8;
     let mut pwm_0 = pwm::Pwm::new_output_ab(p.PWM_SLICE0, p.PIN_0, p.PIN_1, pwm_0_config.clone());
 
+    status_run(&spawner, gpio::AnyPin::from(p.PIN_25));
     led_ctrl_run(&spawner);
     toggle_run(&spawner, gpio::AnyPin::from(p.PIN_2));
+    info!("setup done");
 
     loop {
         let (led_id, brightness) = CHANNEL_LED.receive().await;
