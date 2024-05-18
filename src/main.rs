@@ -5,11 +5,11 @@ use core::sync::atomic::AtomicBool;
 
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_rp::{gpio, Peripheral, pwm, uart};
-use embassy_sync::blocking_mutex::raw::{NoopRawMutex, ThreadModeRawMutex};
-use embassy_sync::channel::{Channel, Receiver, Sender};
-use embassy_sync::pubsub::{Publisher, PubSubBehavior, PubSubChannel, Subscriber};
-use embassy_time::{Duration, Ticker, Timer};
+use embassy_rp::{gpio, pwm, uart};
+use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
+use embassy_sync::channel::Channel;
+use embassy_sync::pubsub::PubSubChannel;
+use embassy_time::Duration;
 
 use {defmt_rtt as _, panic_probe as _};
 
@@ -31,20 +31,23 @@ fn led_ctrl_run(spawner: &Spawner) {
         id: 0,
         k: 8,
         multiplier: 1.07,
+        threshold: BRIGHTNESS_THRESHOLD,
         tick,
     };
     let config_1 = led_ctrl::Config {
         id: 1,
         k: 8,
         multiplier: 1.1,
+        threshold: BRIGHTNESS_THRESHOLD,
         tick,
     };
+    let to_state = || led_ctrl::State { enabled: &ENABLED };
     let to_channel = || led_ctrl::Channel {
         enabled: CHANNEL_ENABLED.subscriber().unwrap(),
         led: CHANNEL_LED.sender(),
     };
-    unwrap!(spawner.spawn(led_ctrl::run(config_0, to_channel())));
-    unwrap!(spawner.spawn(led_ctrl::run(config_1, to_channel())));
+    unwrap!(spawner.spawn(led_ctrl::run(config_0, to_state(), to_channel())));
+    unwrap!(spawner.spawn(led_ctrl::run(config_1, to_state(), to_channel())));
 }
 
 fn status_run(spawner: &Spawner, pin: gpio::AnyPin) {
