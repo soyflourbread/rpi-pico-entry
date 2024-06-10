@@ -1,40 +1,15 @@
 #![no_std]
 #![no_main]
 
-use core::sync::atomic::AtomicBool;
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_rp::{gpio, pwm, uart, adc};
-use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
-use embassy_sync::channel::Channel;
-use embassy_sync::pubsub::PubSubChannel;
+use embassy_rp::{adc, gpio, pwm, uart};
 use embassy_time::Duration;
 
+use heapless::Vec;
+
 use {defmt_rtt as _, panic_probe as _};
-use rpi_pico_entry::{status, toggle};
-
-static ENABLED: AtomicBool = AtomicBool::new(false);
-
-static CHANNEL_ENABLED: PubSubChannel<ThreadModeRawMutex, bool, 4, 4, 4> = PubSubChannel::new();
-
-fn status_run(spawner: &Spawner, pin: gpio::AnyPin) {
-    let duration = Duration::from_millis(100);
-    let config = status::Config { pin, duration };
-    let channel = status::Channel {
-        enabled: CHANNEL_ENABLED.subscriber().unwrap(),
-    };
-    unwrap!(spawner.spawn(status::run(config, channel)));
-}
-
-fn toggle_run(spawner: &Spawner, pin: gpio::AnyPin) {
-    let duration = Duration::from_millis(20);
-    let config = toggle::Config { pin, duration };
-    let state = toggle::State { enabled: &ENABLED };
-    let channel = toggle::Channel {
-        enabled: CHANNEL_ENABLED.publisher().unwrap(),
-    };
-    unwrap!(spawner.spawn(toggle::run(config, state, channel)));
-}
+use rpi_pico_entry::debouncer::Debouncer;
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -48,18 +23,42 @@ async fn main(spawner: Spawner) {
 
     let mut pwm_0_config: pwm::Config = Default::default();
     pwm_0_config.phase_correct = true;
-    pwm_0_config.divider = 0xFF.into();
-    pwm_0_config.top = 0x80;
-    pwm_0_config.compare_a = 0x0;
-    let mut pwm_0 = pwm::Pwm::new_output_a(p.PWM_SLICE0, p.PIN_0, pwm_0_config.clone());
 
-    status_run(&spawner, gpio::AnyPin::from(p.PIN_25));
-    toggle_run(&spawner, gpio::AnyPin::from(p.PIN_2));
+    let divider = 0x20u8;
 
-    let mut chan_enabled_sub = CHANNEL_ENABLED.subscriber().unwrap();
-    while let enabled = chan_enabled_sub.next_message_pure().await {
-        info!("enabled: {}", enabled);
-        pwm_0_config.compare_a = if enabled { 0x10 } else { 0x0 };
+    let mut top = 125000000f32; // frequency of rp2040
+    top *= 20.0;
+    top /= 1000.0; // number of cycles for 20ms
+    top /= 2.0; // phase correct wave
+    top /= divider as f32;
+    top -= 1.0;
+    let top = top as u16;
+    info!("pwm cycle: {}", top);
+    
+    let ts_vec: [f32; 4] = [1.5, 1.2, 1.5, 1.8];
+    let width_vec = ts_vec.into_iter()
+        .map(|ts| top as f32 * ts / 20.0)
+        .map(|compare| compare as u16)
+        .collect::<Vec<u16, 8>>();
+    let mut ptr = usize::MIN;
+    info!("div: {:?}", width_vec.as_slice());
+    
+    pwm_0_config.divider = divider.into();
+    pwm_0_config.top = top;
+    pwm_0_config.compare_a = width_vec[ptr]; // range: 0.5ms-2.5ms, 8-40, medium: 1.5ms, 13.33
+    let mut pwm_0 = pwm::Pwm::new_output_a(p.PWM_SLICE0,  p.PIN_0, pwm_0_config.clone());
+
+    let mut button = Debouncer::new(
+        gpio::Input::new(p.PIN_1, gpio::Pull::Up),
+        Duration::from_millis(20),
+    );
+
+    while let level = button.debounce().await {
+        if level == gpio::Level::Low { continue; }
+
+        ptr += 1;
+        ptr %= width_vec.len();
+        pwm_0_config.compare_a = width_vec[ptr];
         pwm_0.set_config(&pwm_0_config);
     }
 }
